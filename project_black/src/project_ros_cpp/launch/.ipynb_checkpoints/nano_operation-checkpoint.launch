@@ -1,0 +1,19 @@
+<launch>
+
+  <node name="control_tower_node" pkg="project_ros_cpp"
+      type="control_tower" />
+
+  <node name="rotation_and_move_node" pkg="project_ros_cpp"
+      type="rotation_and_move" output="screen" />   
+      
+  <node name="clean_map_node" pkg="project_ros_cpp"
+      type="clean_map" args="7780" />
+
+  <node name="img_send_node" pkg="project_ros_cpp"
+      type="img_send" />
+     
+  <node name="nano_move" pkg="project_ros_python"
+      type="nano_move.py" />   
+
+
+</launch>

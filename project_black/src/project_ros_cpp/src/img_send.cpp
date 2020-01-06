@@ -1,0 +1,309 @@
+#include <ros/ros.h>
+#include <iostream>
+#include <cstring>
+#include <cstdio>
+#include <stdlib.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <unistd.h>
+#include <arpa/inet.h>
+#include <sys/time.h>
+#include <algorithm>
+
+#include <opencv2/opencv.hpp>
+
+#include "project_ros_cpp/nano_control.h"
+
+#define PORT_NUM	4000
+#define SERVER_IP	"192.168.0.40" // server pc ipaddr
+#define SEND_SIZE	1024
+#define MODE_FILE_NAME    "/home/jetbot/web/mode"
+#define MODE110_FILE_NAME    "/home/jetbot/mode110"
+//#define DEBUG
+
+using namespace cv;
+using namespace std;
+
+project_ros_cpp::nano_control tracking_order;
+
+int main(int argc, char** argv)
+{
+	///////////////////////////////////////
+	// 0. ros, socket, file 관련 선언 및 초기화 //
+	///////////////////////////////////////
+	
+    ros::init(argc, argv, "tracking_node"); 
+	ros::NodeHandle nh; 
+    ros::Publisher nano_tracking_pub = nh.advertise<project_ros_cpp::nano_control>("ros_move_topic", 1);
+
+    tracking_order.move_message = 1;
+    nano_tracking_pub.publish(tracking_order);
+    
+    FILE* mode_fp, * mode110_fp, * mode310_fp;
+	int client_socket;
+	struct sockaddr_in server_addr;
+
+	int send_info[3];	// 압축 image 사이즈 정보
+	char mode_info[3];	// mode 정보 
+	unsigned char *send_data;	// mat data 정보
+	char recv_buff[3];	// darknet으로부터 받을 메세지 정보
+	int ret, total_size, data_loc = 0;
+	int count = 0;
+	int tracking_off_flag = 0;
+    
+	// TCP로 client_socket 생성
+	client_socket = socket(PF_INET, SOCK_STREAM, 0);
+	if(-1 == client_socket) {
+		cerr << "server client_socket error\n";
+		return -1;
+	}
+	// socketaddr_in 구조체 초기화 및 정의(서버 addr 정의)
+	memset(&server_addr, 0, sizeof(server_addr));
+	server_addr.sin_family = AF_INET;
+	server_addr.sin_port = htons(PORT_NUM);
+	server_addr.sin_addr.s_addr = inet_addr(SERVER_IP);	// server로 연결
+	//server_addr.sin_addr.s_addr = inet_addr(argv[1]);	// 인자로 받은 ipaddr 연결
+
+#ifdef DEBUG
+	cout << "client_socketaddr ok" << endl;
+#endif
+
+	// 서버에 connect 요청
+	if( -1 == connect(client_socket, (struct sockaddr*)&server_addr, sizeof(server_addr))) {
+		cerr << "connect fail\n";
+		return -1;
+	}
+	cout << "connect ok\n";
+
+	// 카메라 영상 읽기위한 정의, jetson 시리즈는 gstreamer 사용해야해서 pipeline 정의.
+	Mat img;
+	const char* gst = "nvarguscamerasrc ! video/x-raw(memory:NVMM), width=(int)608, height=(int)608, format=(string)NV12, framerate=(fraction)60/1 ! nvvidconv flip-method=4 ! video/x-raw, format=(string)BGRx ! videoconvert ! video/x-raw, format=(string)BGR ! appsink";
+
+	VideoCapture cap(gst);
+	if(!cap.isOpened()) {
+		cerr << "VideoCapture error\n";
+	}
+	
+	// jpeg 압축 파라미터 정의. 압축 quality = 50
+	vector<uchar> buff;
+	vector<int> param_jpeg = vector<int>(2);
+	param_jpeg[0] = IMWRITE_JPEG_QUALITY;
+	param_jpeg[1] = 50;
+    
+	cout << "\nimage_send start!!" << endl;
+	
+	while( ros::ok() )
+	{
+        int mode;
+		struct timeval time;
+
+#ifdef DEBUG
+ 		gettimeofday(&time, NULL);
+ 		double current_time = (double)time.tv_sec + (double)time.tv_usec * .000001;
+#endif
+		cap.read(img);
+		if(img.empty()){
+			cerr << "image is empty\n";
+			return -1;
+		}
+		
+		//////////////////////////////////////////
+		// 1. image 데이터 darknet으로 전송 (jpeg 압축) //
+		//////////////////////////////////////////
+		
+		// 이미지 압축
+		imencode(".jpg", img, buff, param_jpeg);
+#ifdef DEBUG
+		namedWindow("img", WINDOW_AUTOSIZE);
+		imshow("img", img);
+		waitKey(1);
+#endif
+		// 압축된 이미지 크기 전송 (할때마다 크기 다름)
+		send_info[0] = buff.size();
+		ret = send(client_socket, send_info, sizeof(send_info), 0);
+		if(ret < 0) {
+			cerr << "image info send fail\n";
+			return -1;
+		}
+#ifdef DEBUG
+		cerr << "send info: " << send_info[0] << endl;
+#endif
+		// 압축된 이미지 데이터 전송
+		send_data = &buff[0];
+		ret = send(client_socket, send_data, buff.size(), 0);
+		if(ret < 0) {
+			cerr << "image data send fail\n";
+			return -1;
+		}
+		
+		//////////////////////////////////////////////
+		// 2. mode 파일에서 현재 mode 읽기 및 darknet으로 전송 //
+		//////////////////////////////////////////////
+		
+		// 파일 열기
+		mode_fp = fopen(MODE_FILE_NAME, "r+");
+		if (mode_fp == nullptr) {
+			cerr << "mode.txt open fail!\n";
+		}
+		
+		// mode 읽기
+        fread(mode_info, 1, sizeof(mode_info), mode_fp);
+        fseek(mode_fp, 0, SEEK_SET);
+        mode = atoi(mode_info);
+		
+		fclose(mode_fp);
+
+#ifdef DEBUG
+		cout << "mode: " << mode << endl;
+#endif
+        
+        // mode 정보 전송
+		ret = send(client_socket, mode_info, sizeof(mode_info), 0);
+		if(ret < 0) {
+			cerr << "mode info send fail\n";
+			return -1;
+		}
+
+		//////////////////////////////////////////////////////
+		// 	           3. darknet으로 부터 메세지 수신              //
+		// (char 3개 배열, [0]-> 모드정보, [1]->이동정보, [2]->캡처정보) //
+		//////////////////////////////////////////////////////
+		
+		// server 작업 끝날때까지 대기
+		ret = recv(client_socket, recv_buff, sizeof(recv_buff), 0);
+
+  		gettimeofday(&time, NULL);
+#ifdef DEBUG
+  		double recv_time = (double)time.tv_sec + (double)time.tv_usec * .000001;
+  		recv_time -= current_time;
+  		cout << "time: " << recv_time << endl;
+#endif
+
+
+#ifdef DEBUG
+		cout << "recv: " << recv_buff[0] << recv_buff[1] << recv_buff[2] << endl;
+#endif
+		struct tm tm = *localtime(&time.tv_sec);
+		char filename[256];
+
+		////////////////////////////
+		// 4. mode가 110(감지모드)일 때 //
+		////////////////////////////
+		
+        if (mode == 110) { // 감지모드 110
+		
+			//////////////////////////////////////
+			// 4-1. 캡처정보 확인, 1 또는 2 이면 이미지 저장 //
+			//////////////////////////////////////
+
+            ////////// 박스 안친 이미지 저장 ////////////////
+            // if (recv_buff[2] == '1') { // person img save
+            // 	sprintf(filename, "/home/jetbot/web/public/images/%d%02d%02d_%02d%02d%02d.jpg", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec);
+            // 	imwrite(filename, img, param_jpeg);
+            // }
+            // else if (recv_buff[2] == '2') { // fire img save
+            // 	sprintf(filename, "/home/jetbot/web/public/images/%d%02d%02d_%02d%02d%02d.jpg", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec);
+            // 	imwrite(filename, img, param_jpeg);
+            // }
+		
+            ////////// 박스 친 이미지 저장 ////////////////
+            if (recv_buff[2] == '1' || recv_buff[2] == '2') {
+                int jpg_size = 0;
+                unsigned char* jpg_data = nullptr;
+
+                if (recv_buff[2] == '1') { // person img save name
+                    sprintf(filename, "/home/jetbot/web/public/images/%d%02d%02d_%02d%02d%02d.jpg", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec);
+                }
+                else if (recv_buff[2] == '2') { // fire img save name
+                    sprintf(filename, "/home/jetbot/web/public/images/%d%02d%02d_%02d%02d%02d.jpg", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec);
+                }
+
+                // jpg size recv
+                ret = 0;
+                while (ret != sizeof(int)) {
+                    ret += recv(client_socket, &jpg_size + ret, sizeof(int) - ret, 0);
+                    if(ret < 0) {
+                        cerr << "jpg info receive fail\n";
+                        return -1;
+                    }
+                }
+                jpg_data = (unsigned char*)calloc(jpg_size, sizeof(unsigned char));
+
+                // jpg data recv
+                ret = 0;
+                while(ret != jpg_size){ // 받아야하는 값 만큼 실제 받을때까지,
+                    ret += recv(client_socket, jpg_data + ret, jpg_size - ret, 0);
+                    if(ret < 0) {
+                        cerr << "jpg data receive fail\n";
+                        return -1;
+                    }
+                }
+
+                // jpg decode & jpg save
+                vector<uchar> decoding(jpg_data, jpg_data + jpg_size);
+                Mat jpg_img = imdecode(decoding, IMREAD_COLOR);
+                imwrite(filename, jpg_img, param_jpeg);
+            } // 이미지 저장 끝
+
+			/////////////////////////////////////////
+			// 4-2. 이동정보 확인, 받은 값 mode110 파일에 쓰기 //
+			/////////////////////////////////////////
+
+            //////////// 정지 명령 쓰기 /////////////
+            if (recv_buff[1] == '5') { // 정지
+                // 파일에 쓰기 또는 publish
+                mode110_fp = fopen(MODE110_FILE_NAME, "w");
+				if (mode110_fp == nullptr) {
+					cerr << "mode110.txt open fail!\n";
+				}
+#ifdef DEBUG
+				cout << "mode110 write: " << recv_buff[1] << endl;
+#endif
+                fwrite(recv_buff + 1, 1, 1, mode110_fp);
+                fseek(mode110_fp, 0, SEEK_SET);
+                fclose(mode110_fp);
+            }
+            else {// 정지아님
+                // 파일에 쓰기 또는 publish
+                mode110_fp = fopen(MODE110_FILE_NAME, "w");
+				if (mode110_fp == nullptr) {
+					cerr << "mode110.txt open fail!\n";
+				}
+#ifdef DEBUG
+				cout << "mode110 write: " << recv_buff[1] << endl;
+#endif
+                fwrite(recv_buff + 1, 1, 1, mode110_fp);
+                fseek(mode110_fp, 0, SEEK_SET);
+                fclose(mode110_fp);
+            }
+        } // 감지모드 110 끝
+
+		//////////////////////////////////////////////////////////
+		//               5. mode가 310(추적모드)일 때                 //
+		// 이동명령 확인, ros의 nano_control 메세지로 이동 값 퍼블리시(publish) //
+		//////////////////////////////////////////////////////////
+
+        if(mode == 310) { // 추적모드 310
+            tracking_order.move_message = (int)(recv_buff[1] - 48);
+            printf("%c\n",recv_buff[1]);
+            nano_tracking_pub.publish(tracking_order);
+            tracking_off_flag = 1;
+        }
+        else { // 추적모드 310 이 아닌 경우
+            if(tracking_off_flag == 1) {
+                tracking_order.move_message = 5;
+                nano_tracking_pub.publish(tracking_order);
+                tracking_off_flag = 0;
+            }
+        }
+	}
+	
+	cerr << "Quit img_send program!\n";
+#ifdef DEBUG
+	destroyWindow("img");
+#endif
+	close(client_socket);
+    sleep(5);
+	return 0;
+}

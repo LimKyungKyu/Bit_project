@@ -1,0 +1,157 @@
+///////////////////////////특징점을 통한 이미지 매칭///////////////////////////////////////////
+
+Window 환경
+
+1. CMAKE를 이용한 opencv_extra_module 빌드
+ 1) 다운로드
+    - CMAKE gui 다운로드 https://cmake.org/download/ 
+    - opencv 버전에 맞는 opencv_contrib(opencv_extra_module)다운로드 https://github.com/opencv/opencv_contrib/releases
+ 2) CMAKE 설정
+    - where is the source code - C:\opencv\sources (본인이 설치한 opencv 경로에 맞춰서)
+    - where to build the binaries - C:\opencv_extra_build (임의로 폴더를 생성 /  저장할 공간)
+    - 이후 'configure' 를 누르면 새로운 창이 뜬다. 이때 본인의 비주얼 버전에 맞게 선택 후 Use default native compilers에 체크 후 finish
+    - 'configure done' 메시지 확인 후 'OPENCV_EXTRA_MODULES_PATH' 에 git에서 다운받은 opencv_contrib의 modules 디렉토리 지정
+    - 이후 Generate 클릭
+3) 비주얼에서 빌드
+    - 임의로 생성하여 저장한 폴더에서 프로젝트 파일을 실행한다
+    - 이후 CMakeTargets 이라는 폴더의 INSTALL 파일을 우클릭하고, build 실행
+    - Debug 모드 , Release 모드 각 필요에 따라 build
+4) 프로젝트 설정
+    - 환경변수에 C:\opencv_extra_build\install\x86\vc12\bin; 와 같이 추가 (install 폴더 내에 있음)
+    - 나머지 추가 포함 디렉토리, 추가 종속성은 기존의 opencv 설정과 같음
+5) 기타
+   - Set OPENCV_ENABLE_NONFREE CMake option and rebuild the library in function 'create' 오류가 발생하기 때문에
+     CMake 시 OPENCV_ENABLE_NONFREE 옵션 선택
+
+
+2. 이미지 매칭
+ - SIFT, SURF, ORB 적용
+ 1) SIFT - 크기 불변 특징 변환으로 크기 변환에 무관하게 특징점을 추출
+          - 영상의 크기, 회전 등의 변환뿐만 아니라 촬영 시점 변화에도 충분히 강인하게 동작하며, 잡음의 영향과 조명변화가 있어도 특징점을 반복적으로 잘 찾아낸다.
+          - 특징점을 검출할 때에는 인접한 가우시안 블러링 영상끼리의 차영상을 사용하며, 이를 DoG(Difference of Gaussian) 영상이라고 한다.
+    SURF - SIFT의 속도와 성능을 개선한 알고리즘
+
+ 2) 
+
+#include <opencv2\opencv.hpp>
+#include <opencv2\xfeatures2d\nonfree.hpp>
+#include <opencv2\features2d.hpp>
+#include <iostream>
+#include <math.h>
+
+void find_homography()
+{
+	cv::Mat origin_image, result_image, image_part1;
+	origin_image = cv::imread("C:\\Users\\bit\\Desktop\\1.jpg");  //원본(전체) 이미지
+	image_part1 = cv::imread("C:\\Users\\bit\\Desktop\\11.jpg"); //부분 이미지
+
+	/* 그레이 스케일로 변환 */
+	cv::cvtColor(origin_image, origin_image, CV_BGR2GRAY);
+	cv::cvtColor(image_part1, image_part1, CV_BGR2GRAY);
+
+	/* SURF, SIFT, ORB 클래스 객체 생성(ORB의 경우 빠른 속도를 보이나 매칭률이 떨어지는 것으로 확인) */
+	cv::Ptr<cv::Feature2D> feature = cv::xfeatures2d::SURF::create();
+	//cv::Ptr<cv::Feature2D> feature = cv::xfeatures2d::SIFT::create();
+	//cv::Ptr<cv::Feature2D> feature = cv::ORB::create();
+
+	std::vector<cv::KeyPoint> keypoints1, keypoints2;
+
+	cv::Mat desc1, desc2;
+	/* keypoint(특징점, 관심점), descriptor(기술자)
+	하나의 keypoint에 대한 SIFT Descriptor는 image gradient의 3차원 공간 히스토그램
+	image gradient의 의미는, 어떤 이미지에서 명암값이나 컬러값의 변화방향
+	특징점-> 크기와 방향성을 가짐, 주로 선분의 끝, 모서리
+	기술자-> 해당 특징점 위치에서 추출한 지역적 영상 특징 정보를 여러개의 실수 값으로 표현(ex. gradienet 분포 히스토그램)*/
+
+	feature->detectAndCompute(image_part1, cv::Mat(), keypoints1, desc1);
+	feature->detectAndCompute(origin_image, cv::Mat(), keypoints2, desc2);	
+	
+	/* DMatch 클래스는 한 장의 영상에서 추출한 특징점과 다른 한 장의 영상, 또는 여러 영상에서 추출한 특징점 사이의 매칭 정보를 표현
+	DMatch클래스에서 distance 멤버 변수는 두 키포인트 기술자가 얼마나 차이가 나는지를 나타내는 매칭정도 서로 유사하면 0에 가깝다 
+	특징점 매칭 클래스는 DescriptorMatcher 클래스를 상속
+	BFMatcher 클래스는 질의 질의 기술자, 훈련 기술자 집합에 있는 모든 기술자 사이의 거리를 께산하고 가장 거리가 작은 기술자를 매칭
+	특징점 개수가 늘어날수록 계산 횟수가 급격하게 늘어나는 단점을 가지고 있어 FlannBasedMatcher 클래스 사용하는 것이 효율적(L2 노름 거리 방식 사용)*/
+
+	//cv::Ptr<cv::DescriptorMatcher> matcher = cv::BFMatcher::create(cv::NORM_L1);
+	cv::Ptr<cv::DescriptorMatcher> matcher = cv::FlannBasedMatcher::create();
+	//cv::Ptr<cv::DescriptorMatcher> matcher = cv::BFMatcher::create(cv::NORM_HAMMING);
+	
+	/* desc1에 포함된 각각의 기술자와 가장 유사한 기술자를 desc2에서 찾고 matches에 저장*/
+	std::vector<cv::DMatch> matches;
+	matcher->match(desc1, desc2, matches);
+	
+	std::sort(matches.begin(), matches.end());	
+	
+	/* 상위 n개 결과 */
+	std::vector<cv::DMatch> good_matches(matches.begin(), matches.begin() + 50);
+
+	cv::drawMatches(image_part1, keypoints1, origin_image, keypoints2, good_matches, result_image, cv::Scalar::all(-1), cv::Scalar::all(-1),
+		std::vector<char>(), cv::DrawMatchesFlags::NOT_DRAW_SINGLE_POINTS);
+	
+	/* 유사도 확인 */
+	float matches_distance = 0;
+	for (size_t i = 0; i < good_matches.size(); i++)
+	{
+		matches_distance = (matches_distance + good_matches[i].distance) / good_matches.size();
+	}
+	std::cout << "유사도(0에 가까울수록 높은 유사도) : " << matches_distance << std::endl;
+
+	std::vector<cv::Point2f> pts1, pts2;
+	for (size_t i = 0; i < good_matches.size(); i++)
+	{
+		/* queryIdx 질의 기술자 번호, trainIdx 훈련 기술자 번호 */
+		pts1.push_back(keypoints1[good_matches[i].queryIdx].pt);
+		pts2.push_back(keypoints2[good_matches[i].trainIdx].pt);
+	}
+
+	/* 부분 이미지 좌표, 원본 이미지 좌표 출력 */
+	for (size_t i = 0; i < good_matches.size(); i++)
+	{
+		std::cout << keypoints1[good_matches[i].queryIdx].pt << std::endl;
+	}
+
+	std::cout << "///////////////////////////////////////" << std::endl;
+
+	for (size_t i = 0; i < good_matches.size(); i++)
+	{
+		std::cout << keypoints2[good_matches[i].trainIdx].pt << std::endl;
+	}
+
+	/* 원본 이미지에서 대응하는 좌표확인 시각적으로 확인(점그리기) */
+	for (size_t i = 0; i < good_matches.size(); i++)
+	{
+		cv::circle(origin_image, keypoints2[good_matches[i].trainIdx].pt, 0.1, cv::Scalar(0, 0, 0), 10);
+	}
+	
+	/* 호모그래피 행렬 계산 */
+	cv::Mat H = cv::findHomography(pts1, pts2, cv::RANSAC);
+
+	/* 부분이미지를 원본이미지에 투시변환 하기 위한 과정*/
+	std::vector<cv::Point2f> corners1, corners2;
+	corners1.push_back(cv::Point2f(0, 0));
+	corners1.push_back(cv::Point2f(image_part1.cols - 1.f, 0));
+	corners1.push_back(cv::Point2f(image_part1.cols - 1.f, image_part1.rows - 1.f));
+	corners1.push_back(cv::Point2f(0, image_part1.rows - 1.f));
+	cv::perspectiveTransform(corners1, corners2, H);
+
+	std::vector<cv::Point> corners_dst;
+	for (cv::Point2f pt : corners2) {
+		corners_dst.push_back(cv::Point(cvRound(pt.x + image_part1.cols), cvRound(pt.y)));
+	}
+
+	cv::polylines(result_image, corners_dst, true, cv::Scalar(0, 255, 0), 2, cv::LINE_AA);	
+
+	cv::imshow("origin_image", origin_image);
+	cv::imshow("result_image", result_image);
+	
+	cv::waitKey();
+
+}
+int main() 
+{
+	find_homography();
+
+	return 0;
+}
+
+

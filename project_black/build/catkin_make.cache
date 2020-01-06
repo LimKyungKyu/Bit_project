@@ -1,0 +1,2 @@
+project_ros_cpp:project_ros_python:x2_cartographer/carto_mapper:x2_cartographer/ydlidar_ros
+-DCATKIN_DEVEL_PREFIX=/home/jetbot/project_black/devel -DCMAKE_INSTALL_PREFIX=/home/jetbot/project_black/install -G Unix Makefiles

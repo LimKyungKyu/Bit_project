@@ -1,0 +1,8 @@
+prefix=/home/jetbot/project_black/devel
+
+Name: project_ros_cpp
+Description: Description of project_ros_cpp
+Version: 0.0.0
+Cflags: -I/home/jetbot/project_black/devel/include -I/home/jetbot/project_black/src/project_ros_cpp/include
+Libs: -L/home/jetbot/project_black/devel/lib -lproject_ros_cpp
+Requires: roscpp rospy std_msgs tf message_runtime
